@@ -1,9 +1,9 @@
+import NavBar from "./components/NavBar";
+import MainPage from "./pages/MainPage";
 
 
-function App() {
-  return (
-    <div>helo</div>
-  )
-}
+const App = () => {
+  return <MainPage/>;
+};
 
-export default App
+export default App;
