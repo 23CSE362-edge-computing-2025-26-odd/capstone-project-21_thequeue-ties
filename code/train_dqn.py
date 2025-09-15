@@ -3,7 +3,7 @@ import os
 
 def train_dqn(agent, env, num_episodes=500, batch_size=32, save_dir="./CI_Model"):
     """
-    Trains the DQN agent on the given environment, with controlled breakdowns.
+    Trains the DQN agent on the given environment.
 
     Args:
         agent: The DQNAgent instance.
@@ -14,13 +14,6 @@ def train_dqn(agent, env, num_episodes=500, batch_size=32, save_dir="./CI_Model"
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    # Controlled breakdown scenarios (machine_id, timestep)
-    breakdown_scenarios = [
-        {"machine_id": "A_1", "timestep": 5},
-        {"machine_id": "A_2", "timestep": 12},
-        {"machine_id": "B_1", "timestep": 20}
-    ]
-
     for e in range(num_episodes):
         state = env.reset()
         state = np.reshape(state, [1, agent.state_size])
@@ -30,13 +23,6 @@ def train_dqn(agent, env, num_episodes=500, batch_size=32, save_dir="./CI_Model"
         step = 0
 
         while not done:
-            step += 1
-
-            # Inject controlled breakdowns at specific timesteps
-            for scenario in breakdown_scenarios:
-                if step == scenario["timestep"]:
-                    env.simulate_machine_failure(scenario["machine_id"])
-
             # Get legal actions mask from environment
             legal_actions_mask = env.get_legal_actions_mask()
 
@@ -56,6 +42,7 @@ def train_dqn(agent, env, num_episodes=500, batch_size=32, save_dir="./CI_Model"
 
             state = next_state
             episode_reward += reward
+            step += 1
 
         # Decay epsilon at end of episode
         agent.end_episode()

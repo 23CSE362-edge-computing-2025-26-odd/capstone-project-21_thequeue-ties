@@ -54,29 +54,14 @@ class DQNAgent:
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
 
-    def act(self, state, legal_actions_mask, debug=False, timestep=None):
-        """
-        Choose an action given current state and legal action mask.
-        If debug=True, will print action decision details.
-        """
+    def act(self, state, legal_actions_mask):
         if np.random.rand() <= self.epsilon:
-            # Exploration
             legal_indices = np.flatnonzero(legal_actions_mask)
-            action = np.random.choice(legal_indices) if len(legal_indices) > 0 else 0
-            if debug:
-                print(f"[DQN][EXPLORE] t={timestep} → chose action {action} (random from {legal_indices})")
-            return action
+            return np.random.choice(legal_indices) if len(legal_indices) > 0 else 0
 
-        # Exploitation: pick the best Q-value among legal actions
         q_values = self.model.predict(state, verbose=0)[0]
         q_values[~legal_actions_mask] = -np.inf
-        action = np.argmax(q_values)
-
-        if debug:
-            print(f"[DQN][EXPLOIT] t={timestep} → Q-values={q_values}, chose action={action}")
-
-        return action
-
+        return np.argmax(q_values)
 
     def replay(self, batch_size):
         if len(self.memory) < batch_size:

@@ -8,7 +8,7 @@ def main():
     # 1. Load Configuration
     with open('machines.json', 'r') as f:
         machine_data = json.load(f)
-    with open('scenario_test.json', 'r') as f:
+    with open('scenario_full.json', 'r') as f:
         jobs_data = json.load(f)
 
     # 2. Initialize Agent and Environment
@@ -21,7 +21,7 @@ def main():
         jobs_data=jobs_data,
         machine_data=machine_data,
         agent=agent,
-        silent_mode=False
+        silent_mode=True
     )
 
     # 3. Load pre-trained model if it exists
