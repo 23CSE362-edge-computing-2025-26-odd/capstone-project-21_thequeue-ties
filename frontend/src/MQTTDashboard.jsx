@@ -24,7 +24,7 @@ import {
  */
 
 const DEFAULT_BROKER =
-  import.meta?.env?.VITE_MQTT_WS_URL || "ws://localhost:9001"; // WS listener; path will be normalized to /mqtt
+  import.meta?.env?.VITE_MQTT_WS_URL || "ws://localhost:8083"; // WS listener; path will be normalized to /mqtt
 const STATUS_TOPIC = "job/status";      // per-tick machine telemetry
 const EVENT_TOPIC = "jobshop/status";   // lifecycle events (STARTED/COMPLETED/FAILED)
 
@@ -212,7 +212,7 @@ export default function MQTTDashboard() {
           <div className="flex items-center gap-2">
             <input
               className="bg-neutral-800 border border-neutral-700 rounded px-3 py-1 text-sm w-64"
-              placeholder="ws://localhost:9001"
+              placeholder="ws://localhost:8083"
               value={brokerUrl}
               onChange={(e) => setBrokerUrl(e.target.value)}
             />

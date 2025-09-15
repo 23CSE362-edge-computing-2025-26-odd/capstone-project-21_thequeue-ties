@@ -2,13 +2,13 @@
 import json
 import random
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 from jobs import Job
 
 @dataclass
 class Machine:
     """
-    Digital Twin Enabled Machine Class for Flexible Job Shop Simulation.
+    Digital Twin Enabled Machine: class-based routing + failure/repair.
     """
     class_name: str
     machine_id: str
@@ -38,76 +38,71 @@ class Machine:
     def assign(self, job: Job) -> bool:
         if not self.idle:
             return False
+        if job.required_class != self.class_name:
+            return False
         self.busy_with = job
         return True
 
+    # --- helpers ---
     def _cooldown(self):
-        # natural drift back toward base when idle
         self.temperature = max(self.temp_base, self.temperature - 1.2)
         self.vibration  = max(self.vib_base,  self.vibration  - 0.25)
 
     def _maybe_spike(self):
-        # Small chance to generate a spike *just above* threshold to cause a failure
-        if random.random() < 0.07:  # 7% tick chance for temp
+        # small random spikes to occasionally cross thresholds
+        if random.random() < 0.07:
             self.temperature += random.uniform(2.0, 6.0)
-        if random.random() < 0.05:  # 5% tick chance for vib
+        if random.random() < 0.05:
             self.vibration  += random.uniform(0.8, 2.0)
 
-    def step(self):
+    # --- tick ---
+    def step(self) -> Tuple[Optional[str], Optional[Job]]:
         """
-        One simulation tick.
-        - If repairing: count down.
-        - If running a job: update temp/vib with noise, maybe spike; decrement job steps.
-        - If idle: cooldown slightly.
-        Returns a tuple: (event, payload or None)
-          event in {None, "FAILED", "COMPLETED"} for machine-level job result.
+        Returns (event, data): event in {None, "FAILED", "STEP_DONE", "COMPLETED"}
         """
-        # Under repair
         if self.repairing_left > 0:
             self.repairing_left -= 1
             if self.repairing_left == 0:
-                # Machine recovered
                 self.temperature = self.temp_base
-                self.vibration = self.vib_base
+                self.vibration  = self.vib_base
             return None, None
 
-        # Running a job
         if self.busy_with:
             j = self.busy_with
-            # Add job influence + small noise
+            # apply job load + noise
             self.temperature += j.temp_inc + random.uniform(-1.0, 1.4)
             self.vibration  += j.vib_inc  + random.uniform(-0.4, 0.6)
-
-            # occasional spike to trigger failure path
             self._maybe_spike()
 
-            # Threshold check
+            # thresholds
             if self.temperature >= self.temp_threshold or self.vibration >= self.vib_threshold:
-                # fail job
+                # Return the job so the simulation can requeue to FRONT of same-class queue
+                failed_job = self.busy_with
+                failed_job.put_back_unfinished_step_front()
                 self.busy_with = None
                 self.repairing_left = self.repair_time
-                return "FAILED", None
+                return "FAILED", failed_job
 
-            # progress job
-            j.remaining_steps -= 1
-            if j.remaining_steps <= 0:
+            before = j.remaining_ticks_on_step
+            j.work_one_tick()
+
+            if j.done:
                 finished = j
                 self.busy_with = None
                 return "COMPLETED", finished
 
+            if before == 1:  # just finished a step (moved to next step)
+                step_done = j
+                self.busy_with = None
+                return "STEP_DONE", step_done
+
             return None, None
 
-        # Idle → cooldown
+        # idle
         self._cooldown()
         return None, None
 
     def status_json(self, timestamp: int) -> str:
-        """
-        Build a JSON payload for MQTT. `current_job` is never null:
-        - "REPAIR" if under repair
-        - job_id if running
-        - "IDLE" if operational but not running
-        """
         if self.repairing_left > 0:
             status = f"Repairing ({self.repair_time - self.repairing_left}/{self.repair_time})"
             current_job = "REPAIR"
@@ -125,7 +120,7 @@ class Machine:
             "temperature": round(self.temperature, 2),
             "vibration": round(self.vibration, 2),
             "status": status,
-            "current_job": current_job,  # never null now
+            "current_job": current_job,  # never null
             "temp_threshold": self.temp_threshold,
             "vib_threshold": self.vib_threshold,
         }
