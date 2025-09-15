@@ -52,32 +52,40 @@ class GeneticAlgorithm:
 
     def _mutate(self, schedule):
         if random.random() < self.mutation_rate:
-            idx1, idx2 = random.sample(range(len(schedule)), 2)
-            schedule[idx1], schedule[idx2] = schedule[idx2], schedule[idx1]
+            if random.random() < 0.5:
+                idx1, idx2 = random.sample(range(len(schedule)), 2)
+                schedule[idx1], schedule[idx2] = schedule[idx2], schedule[idx1]
+            else:
+                idx1, idx2 = random.sample(range(len(schedule)), 2)
+                job = schedule.pop(idx1)
+                schedule.insert(idx2, job)
         return schedule
 
     def run(self):
         population = self._initialize_population()
         
-        for _ in range(self.generations):
+        for gen in range(self.generations):
             fitness_scores = [self._calculate_fitness(ind) for ind in population]
-            
-            # Elitism: carry over the best individuals
+
+            self.mutation_rate = max(0.01, self.mutation_rate * 0.99)
+
             elite_indices = np.argsort(fitness_scores)[-self.elitism_size:]
             next_generation = [population[i] for i in elite_indices]
 
-            # Tournament Selection
             while len(next_generation) < self.population_size:
                 p1 = random.choices(population, weights=fitness_scores, k=1)[0]
                 p2 = random.choices(population, weights=fitness_scores, k=1)[0]
-                
+
                 if random.random() < self.crossover_rate:
-                    child = self._order_crossover(p1, p2)
+                    if random.random() < 0.5:
+                        child = self._order_crossover(p1, p2)
+                    else:
+                        child = self._pmx_crossover(p1, p2)
                 else:
-                    child = p1[:] # Crossover failed, just clone a parent
-                
+                    child = p1[:]
+
                 next_generation.append(self._mutate(child))
-            
+
             population = next_generation
 
         final_fitness_scores = [self._calculate_fitness(ind) for ind in population]
