@@ -22,7 +22,7 @@ ROUTE_PATTERNS = [
     ["B", "D"],
     ["A", "C"],
     ["B", "C"],
-    ["A", "A", "B"],
+    ["A", "D", "B"],
 ]
 
 DURATION_TOTAL_RANGE = (8, 18)  # total ticks across whole job

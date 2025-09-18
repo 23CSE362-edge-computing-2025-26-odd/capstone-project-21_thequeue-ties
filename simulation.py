@@ -2,9 +2,10 @@
 import time
 import random
 import json
-from collections import deque, defaultdict
+from collections import defaultdict
 from typing import List, Dict
 import paho.mqtt.client as mqtt
+from heapq import heappush, heappop
 
 from machines import Machine
 from jobs import Job
@@ -16,7 +17,7 @@ class WorkspaceSimulation:
     """
     Multi-step job shop with class-based routing and failure-aware rescheduling.
     - 8 machines total: A_1, A_2, A_3, B_1, B_2, C_1, C_2, D_1
-    - Per-class FIFO queues
+    - Per-class SJF queues (priority queue by remaining step ticks)
     - On failure: job returns to same-class queue with remaining ticks
     """
 
@@ -38,18 +39,18 @@ class WorkspaceSimulation:
 
         # 8 Machines
         self.machines: List[Machine] = [
-            Machine("A", "A_1", temp_base=40, temp_threshold=85, vib_base=2.0, vib_threshold=8.0,  repair_time=3),
+            Machine("A", "A_1", temp_base=40, temp_threshold=85, vib_base=2.0, vib_threshold=12.0,  repair_time=3),
             Machine("A", "A_2", temp_base=41, temp_threshold=86, vib_base=2.2, vib_threshold=8.5,  repair_time=3),
             Machine("A", "A_3", temp_base=42, temp_threshold=87, vib_base=2.1, vib_threshold=8.5,  repair_time=3),
             Machine("B", "B_1", temp_base=50, temp_threshold=90, vib_base=4.0, vib_threshold=12.0, repair_time=5),
             Machine("B", "B_2", temp_base=49, temp_threshold=90, vib_base=3.8, vib_threshold=12.0, repair_time=5),
             Machine("C", "C_1", temp_base=30, temp_threshold=80, vib_base=3.0, vib_threshold=10.0, repair_time=4),
             Machine("C", "C_2", temp_base=31, temp_threshold=81, vib_base=3.2, vib_threshold=10.0, repair_time=4),
-            Machine("D", "D_1", temp_base=35, temp_threshold=95, vib_base=1.5, vib_threshold=14.0, repair_time=6),
+            Machine("D", "D_1", temp_base=35, temp_threshold=95, vib_base=1.5, vib_threshold=16.0, repair_time=6),
         ]
 
-        # Per-class queues (FIFO) for current-step jobs
-        self.class_queues: Dict[str, deque] = defaultdict(deque)
+        # Per-class queues (SJF: min-heap by remaining ticks)
+        self.class_queues: Dict[str, list] = defaultdict(list)
 
         # Seed jobs
         for _ in range(seed_jobs):
@@ -69,23 +70,23 @@ class WorkspaceSimulation:
     # --- Job flow helpers ---
     def enqueue_new_job(self):
         job = Job.make_random()
-        self.class_queues[job.required_class].append(job)
+        heappush(self.class_queues[job.required_class],
+                 (job.remaining_ticks_on_step, job.job_id, job))
 
     def _enqueue_current_step_front(self, job: Job):
-        """Requeue job at FRONT of current class queue (on failure)."""
-        self.class_queues[job.required_class].appendleft(job)
+        heappush(self.class_queues[job.required_class],
+                 (job.remaining_ticks_on_step, job.job_id, job))
 
     def _enqueue_next_step(self, job: Job):
-        """After finishing a step, move job to the BACK of the next class queue."""
         if not job.done:
-            self.class_queues[job.required_class].append(job)
+            heappush(self.class_queues[job.required_class],
+                     (job.remaining_ticks_on_step, job.job_id, job))
 
     # --- Scheduling ---
     def _assign_jobs(self):
-        """Greedy per-tick: each idle machine pulls from its class queue (FIFO)."""
         for m in self.machines:
             if m.idle and self.class_queues[m.class_name]:
-                job = self.class_queues[m.class_name].popleft()
+                _, _, job = heappop(self.class_queues[m.class_name])  
                 if m.assign(job):
                     self._publish_jobshop_event("STARTED", {
                         "timestamp": self.t,
@@ -95,8 +96,8 @@ class WorkspaceSimulation:
                         "step_remaining": job.remaining_ticks_on_step,
                     })
                 else:
-                    # shouldn't happen because class must match; push back front
-                    self.class_queues[m.class_name].appendleft(job)
+                    heappush(self.class_queues[m.class_name],
+                             (job.remaining_ticks_on_step, job.job_id, job))
 
     # --- Per tick ---
     def tick(self):
@@ -110,14 +111,12 @@ class WorkspaceSimulation:
             if event == "FAILED":
                 j = data  # job returned by Machine.step()
                 if j is not None:
-                    # Put failed job to FRONT of its current required-class queue
                     self._enqueue_current_step_front(j)
-
                     self._publish_jobshop_event("FAILED", {
                         "timestamp": self.t,
                         "machine_id": m.machine_id,
                         "class": m.class_name,
-                        "job_id": j.job_id,  # now logged
+                        "job_id": j.job_id,
                         "reason": "threshold_exceeded",
                         "temperature": round(m.temperature, 2),
                         "vibration": round(m.vibration, 2),
@@ -125,7 +124,6 @@ class WorkspaceSimulation:
                         "vib_threshold": m.vib_threshold,
                     })
                 else:
-                    # Fallback (shouldn't happen with fixed Machine.step)
                     self._publish_jobshop_event("FAILED", {
                         "timestamp": self.t,
                         "machine_id": m.machine_id,
@@ -154,7 +152,6 @@ class WorkspaceSimulation:
                     "job_id": j.job_id,
                     "machine_id": m.machine_id
                 })
-                # keep system busy (optional)
                 if random.random() < 0.0000000000000001:
                     self.enqueue_new_job()
 
