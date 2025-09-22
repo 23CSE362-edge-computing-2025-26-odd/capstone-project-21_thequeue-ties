@@ -20,3 +20,6 @@ def run_ga_optimization():
         mutation_rate=0.2
     )
     return ga.run(generations=15)
+
+if __name__ == "__main__":
+    run_ga_optimization()

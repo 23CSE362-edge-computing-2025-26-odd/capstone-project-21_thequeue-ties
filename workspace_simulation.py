@@ -115,5 +115,7 @@ class WorkspaceSimulation:
         print("\n[MQTT] Disconnected gracefully.")
 
 if __name__ == "__main__":
-    simulation = WorkspaceSimulation()
+    print("--- Running a DEMO of the simulation with a baseline, non-optimized model ---")
+    baseline_params = [60, 80, 100, 5, 6, 8, 12, 10, 15, 25, 50, 85]
+    simulation = WorkspaceSimulation(fuzzy_params=baseline_params, run_headless=False)
     simulation.run_simulation()
