@@ -6,7 +6,7 @@ class Job:
         self.job_name = job_name
         self.job_priority = priority
         
-        # --- UPGRADE: All core data now comes from the dataset ---
+        # All core data now comes from the dataset 
         self.operations = operations
         self.machine_requirement = [op['machine'] for op in self.operations]
         self.machine_processing_time = [op['time'] for op in self.operations]

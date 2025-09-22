@@ -55,6 +55,5 @@ class Machine:
                 self.repair_timer = 0
                 self.temperature = self.temp_base
                 self.vibration = self.vib_base
-                # --- FIX: This print statement now respects silent_mode ---
                 if not silent_mode:
-                    print(f"✅ Machine {self.machine_id} has been repaired and is now operational.")
+                    print(f"Machine {self.machine_id} has been repaired and is now operational.")
