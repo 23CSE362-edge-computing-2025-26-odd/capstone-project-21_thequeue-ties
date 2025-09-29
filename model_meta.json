@@ -1,0 +1,10 @@
+{
+  "model_path": "failure_rf.pkl",
+  "chosen_threshold": 0.2825,
+  "roc_auc": 0.9581418865849827,
+  "pr_auc": 0.5940422424936918,
+  "best_f1_threshold": 0.2825,
+  "used_recall_target": true,
+  "recall_target": 0.8,
+  "min_precision": 0.2
+}

@@ -1,23 +1,95 @@
-# simulation.py
 import time
 import random
 import json
 from collections import deque, defaultdict
 from typing import List, Dict
+import os
 import paho.mqtt.client as mqtt
+import pandas as pd
+import joblib
 
 from machines import Machine
 from jobs import Job
 
-TOPIC_JOB_STATUS = "job/status"
-TOPIC_JOBSHOP    = "jobshop/status"
+TOPIC_JOB_STATUS     = "job/status"
+TOPIC_JOBSHOP        = "jobshop/status"
+TOPIC_JOB_TELEMETRY  = "job/telemetry"
+
+# --- Load ML model + threshold ---
+MODEL_PATH = "failure_rf.pkl"
+META_PATH  = "model_meta.json"
+
+model = joblib.load(MODEL_PATH)
+THRESHOLD = 0.5
+if os.path.exists(META_PATH):
+    try:
+        with open(META_PATH, "r") as f:
+            meta = json.load(f)
+        THRESHOLD = float(meta.get("chosen_threshold", meta.get("best_f1_threshold", THRESHOLD)))
+        print(f"[MODEL] Loaded threshold from meta: {THRESHOLD:.3f}")
+    except Exception as e:
+        print(f"[MODEL] Could not read {META_PATH}: {e}. Using default {THRESHOLD:.3f}")
+else:
+    print(f"[MODEL] {META_PATH} not found. Using default threshold {THRESHOLD:.3f}")
+
+# optional conservative bump to reduce early preemptions on cold start
+if THRESHOLD < 0.32:
+    THRESHOLD = 0.32
+
+# --- Warmup control (minimal change to reduce initial burst of failures) ---
+WARMUP_TICKS = 3  # assign at most one job per class per tick during first few ticks
+
+# --- Feature builder state ---
+_prev = {}
+_roll = defaultdict(lambda: {"temp": deque(maxlen=5), "vib": deque(maxlen=5)})
+
+def build_features(m: Machine, t: int) -> pd.DataFrame:
+    temp = m.temperature
+    vib = m.vibration
+    t_thresh = m.temp_threshold
+    v_thresh = m.vib_threshold
+    ts_ms = int(t * 1000)
+
+    dt_s = d_temp = d_vib = None
+    if m.machine_id in _prev:
+        dt_s = (ts_ms - _prev[m.machine_id]["ts_ms"]) / 1000.0
+        d_temp = temp - _prev[m.machine_id]["temp"]
+        d_vib = vib - _prev[m.machine_id]["vib"]
+    _prev[m.machine_id] = {"ts_ms": ts_ms, "temp": temp, "vib": vib}
+
+    _roll[m.machine_id]["temp"].append(temp)
+    _roll[m.machine_id]["vib"].append(vib)
+    temp_vals = list(_roll[m.machine_id]["temp"])
+    vib_vals = list(_roll[m.machine_id]["vib"])
+
+    def _std(arr):
+        n = len(arr)
+        if n < 2: return 0.0
+        m_ = sum(arr)/n
+        return (sum((x-m_)**2 for x in arr)/(n-1))**0.5
+
+    features = {
+        "temperature_c": temp,
+        "vibration_rms_mm_s": vib,
+        "temp_threshold": t_thresh,
+        "vib_threshold": v_thresh,
+        "dt_seconds": dt_s,
+        "d_temp": d_temp,
+        "d_vibration": d_vib,
+        "pct_of_temp_thresh": temp / t_thresh if t_thresh else None,
+        "pct_of_vib_thresh":  vib / v_thresh if v_thresh else None,
+        "temp_avg_win": sum(temp_vals)/len(temp_vals),
+        "temp_std_win": _std(temp_vals),
+        "vib_avg_win":  sum(vib_vals)/len(vib_vals),
+        "vib_std_win":  _std(vib_vals),
+        "class_name": m.class_name,
+    }
+    return pd.DataFrame([features])
+
 
 class WorkspaceSimulation:
     """
-    Multi-step job shop with class-based routing and failure-aware rescheduling.
-    - 8 machines total: A_1, A_2, A_3, B_1, B_2, C_1, C_2, D_1
-    - Per-class FIFO queues
-    - On failure: job returns to same-class queue with remaining ticks
+    FIFO job shop with ML-based failure prediction.
     """
 
     def __init__(self,
@@ -26,36 +98,32 @@ class WorkspaceSimulation:
                  keepalive=60,
                  tick_seconds=1.0,
                  seed_jobs=20):
-        # MQTT
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
         self.client.connect(broker, port, keepalive)
         self.client.loop_start()
 
-        # Time
         self.t = 0
         self.tick_seconds = tick_seconds
 
-        # 8 Machines
         self.machines: List[Machine] = [
-            Machine("A", "A_1", temp_base=40, temp_threshold=85, vib_base=2.0, vib_threshold=8.0,  repair_time=3),
-            Machine("A", "A_2", temp_base=41, temp_threshold=86, vib_base=2.2, vib_threshold=8.5,  repair_time=3),
-            Machine("A", "A_3", temp_base=42, temp_threshold=87, vib_base=2.1, vib_threshold=8.5,  repair_time=3),
-            Machine("B", "B_1", temp_base=50, temp_threshold=90, vib_base=4.0, vib_threshold=12.0, repair_time=5),
-            Machine("B", "B_2", temp_base=49, temp_threshold=90, vib_base=3.8, vib_threshold=12.0, repair_time=5),
-            Machine("C", "C_1", temp_base=30, temp_threshold=80, vib_base=3.0, vib_threshold=10.0, repair_time=4),
-            Machine("C", "C_2", temp_base=31, temp_threshold=81, vib_base=3.2, vib_threshold=10.0, repair_time=4),
-            Machine("D", "D_1", temp_base=35, temp_threshold=95, vib_base=1.5, vib_threshold=14.0, repair_time=6),
+            Machine("A", "A_1", 40, 85, 2.0, 8.0, 3),
+            Machine("A", "A_2", 41, 86, 2.2, 8.5, 3),
+            Machine("A", "A_3", 42, 87, 2.1, 8.5, 3),
+            Machine("B", "B_1", 50, 90, 4.0, 12.0, 5),
+            Machine("B", "B_2", 49, 90, 3.8, 12.0, 5),
+            Machine("C", "C_1", 30, 80, 3.0, 10.0, 4),
+            Machine("C", "C_2", 31, 81, 3.2, 10.0, 4),
+            Machine("D", "D_1", 35, 95, 1.5, 14.0, 6),
         ]
 
-        # Per-class queues (FIFO) for current-step jobs
         self.class_queues: Dict[str, deque] = defaultdict(deque)
-
-        # Seed jobs
         for _ in range(seed_jobs):
             self.enqueue_new_job()
 
-    # --- MQTT helpers ---
+        self.completed_jobs = set()
+
+    # --- MQTT ---
     def _on_connect(self, client, userdata, flags, rc):
         print("[MQTT] Connected" if rc == 0 else f"[MQTT] Failed rc={rc}")
 
@@ -64,25 +132,59 @@ class WorkspaceSimulation:
         self.client.publish(TOPIC_JOBSHOP, json.dumps(msg))
 
     def _publish_job_status(self, machine: Machine):
-        self.client.publish(TOPIC_JOB_STATUS, machine.status_json(self.t))
+        # RETAIN latest snapshot so late-joining UI immediately sees all machines
+        self.client.publish(TOPIC_JOB_STATUS, machine.status_json(self.t), retain=True)
 
-    # --- Job flow helpers ---
+    def _publish_job_telemetry(self, machine: Machine):
+        msg = {
+            "timestamp": self.t,
+            "class_name": machine.class_name,
+            "machine_id": machine.machine_id,
+            "temperature_c": getattr(machine, "temperature", machine.temp_base),
+            "vibration_rms_mm_s": getattr(machine, "vibration", machine.vib_base),
+            "seq": self.t,
+        }
+        self.client.publish(TOPIC_JOB_TELEMETRY, json.dumps(msg))
+        return msg
+
+    # --- Queue helpers ---
     def enqueue_new_job(self):
         job = Job.make_random()
         self.class_queues[job.required_class].append(job)
 
     def _enqueue_current_step_front(self, job: Job):
-        """Requeue job at FRONT of current class queue (on failure)."""
         self.class_queues[job.required_class].appendleft(job)
 
     def _enqueue_next_step(self, job: Job):
-        """After finishing a step, move job to the BACK of the next class queue."""
         if not job.done:
             self.class_queues[job.required_class].append(job)
 
     # --- Scheduling ---
     def _assign_jobs(self):
-        """Greedy per-tick: each idle machine pulls from its class queue (FIFO)."""
+        # During warmup, stagger: at most one assignment per class per tick.
+        if self.t < WARMUP_TICKS:
+            assigned_classes = set()
+            for m in self.machines:
+                if (
+                    m.idle
+                    and self.class_queues[m.class_name]
+                    and m.class_name not in assigned_classes
+                ):
+                    job = self.class_queues[m.class_name].popleft()
+                    if m.assign(job):
+                        assigned_classes.add(m.class_name)
+                        self._publish_jobshop_event("STARTED", {
+                            "timestamp": self.t,
+                            "job_id": job.job_id,
+                            "machine_id": m.machine_id,
+                            "required_class": m.class_name,
+                            "step_remaining": job.remaining_ticks_on_step,
+                        })
+                    else:
+                        self.class_queues[m.class_name].appendleft(job)
+            return
+
+        # Normal behavior after warmup
         for m in self.machines:
             if m.idle and self.class_queues[m.class_name]:
                 job = self.class_queues[m.class_name].popleft()
@@ -95,50 +197,67 @@ class WorkspaceSimulation:
                         "step_remaining": job.remaining_ticks_on_step,
                     })
                 else:
-                    # shouldn't happen because class must match; push back front
                     self.class_queues[m.class_name].appendleft(job)
 
-    # --- Per tick ---
+    # --- Prediction ---
+    def _maybe_predict_failure(self, m: Machine):
+        if getattr(m, "repairing_left", 0) > 0 or m.busy_with is None:
+            return
+
+        X = build_features(m, self.t)
+        try:
+            prob = float(model.predict_proba(X)[0, 1])
+        except Exception as e:
+            print(f"[INFER] Predict failed for {m.machine_id}: {e}")
+            return
+
+        near_limit = (
+            (m.temp_threshold and (m.temperature / m.temp_threshold) >= 0.80) or
+            (m.vib_threshold and (m.vibration / m.vib_threshold) >= 0.80)
+        )
+
+        if prob >= THRESHOLD and near_limit:
+            j = m.busy_with
+            self._publish_jobshop_event("PREDICTION", {
+                "timestamp": self.t,
+                "machine_id": m.machine_id,
+                "job_id": j.job_id if j else None,
+                "reason": "will_fail",
+                "risk_score": prob,
+                "threshold": THRESHOLD,
+            })
+            if j:
+                j.put_back_unfinished_step_front()
+                self._enqueue_current_step_front(j)
+                m.busy_with = None
+            m.repairing_left = m.repair_time
+
+    # --- Tick ---
     def tick(self):
         self.t += 1
         self._assign_jobs()
 
         for m in self.machines:
+            self._maybe_predict_failure(m)
             event, data = m.step()
             self._publish_job_status(m)
+            self._publish_job_telemetry(m)
 
             if event == "FAILED":
-                j = data  # job returned by Machine.step()
-                if j is not None:
-                    # Put failed job to FRONT of its current required-class queue
+                j = data
+                if j:
                     self._enqueue_current_step_front(j)
-
                     self._publish_jobshop_event("FAILED", {
                         "timestamp": self.t,
                         "machine_id": m.machine_id,
                         "class": m.class_name,
-                        "job_id": j.job_id,  # now logged
+                        "job_id": j.job_id,
                         "reason": "threshold_exceeded",
                         "temperature": round(m.temperature, 2),
                         "vibration": round(m.vibration, 2),
-                        "temp_threshold": m.temp_threshold,
-                        "vib_threshold": m.vib_threshold,
                     })
-                else:
-                    # Fallback (shouldn't happen with fixed Machine.step)
-                    self._publish_jobshop_event("FAILED", {
-                        "timestamp": self.t,
-                        "machine_id": m.machine_id,
-                        "class": m.class_name,
-                        "reason": "threshold_exceeded",
-                        "temperature": round(m.temperature, 2),
-                        "vibration": round(m.vibration, 2),
-                        "temp_threshold": m.temp_threshold,
-                        "vib_threshold": m.vib_threshold,
-                    })
-
             elif event == "STEP_DONE":
-                j: Job = data
+                j = data
                 self._publish_jobshop_event("STEP_DONE", {
                     "timestamp": self.t,
                     "job_id": j.job_id,
@@ -146,24 +265,37 @@ class WorkspaceSimulation:
                 })
                 if not j.done:
                     self._enqueue_next_step(j)
-
             elif event == "COMPLETED":
-                j: Job = data
+                j = data
+                self.completed_jobs.add(j.job_id)
                 self._publish_jobshop_event("COMPLETED", {
                     "timestamp": self.t,
                     "job_id": j.job_id,
-                    "machine_id": m.machine_id
+                    "machine_id": m.machine_id,
                 })
-                # keep system busy (optional)
-                if random.random() < 0.0000000000000001:
-                    self.enqueue_new_job()
+
+        # check if all queues empty + all machines idle
+        all_idle = all(m.idle for m in self.machines)
+        queues_empty = all(len(q) == 0 for q in self.class_queues.values())
+        if all_idle and queues_empty:
+            print(f"[SIM] All jobs completed at t={self.t}. Disconnecting…")
+            self.client.loop_stop()
+            self.client.disconnect()
+            raise SystemExit
 
     def run(self, max_ticks=120):
         try:
             for _ in range(max_ticks):
                 self.tick()
                 time.sleep(self.tick_seconds)
+        except SystemExit:
+            pass
         finally:
             self.client.loop_stop()
             self.client.disconnect()
             print("[MQTT] Disconnected")
+
+
+if __name__ == "__main__":
+    sim = WorkspaceSimulation(tick_seconds=2, seed_jobs=4)
+    sim.run(max_ticks=1000000)
