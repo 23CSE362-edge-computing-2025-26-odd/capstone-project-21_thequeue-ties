@@ -10,8 +10,8 @@ _job_id_counter = itertools.count(1)
 INTENSITIES = {
     "light":    {"temp_inc": 3.0, "vib_inc": 0.8},
     "moderate": {"temp_inc": 4.5, "vib_inc": 1.2},
-    "heavy":    {"temp_inc": 6.5, "vib_inc": 1.8},
-    "stress":   {"temp_inc": 8.0, "vib_inc": 2.4},
+    "heavy":    {"temp_inc": 5.5, "vib_inc": 1.5},
+    "stress":   {"temp_inc": 6.0, "vib_inc": 2.0},
 }
 
 # Route patterns: each entry is a SEQUENCE of machine CLASSES required

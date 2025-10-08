@@ -73,7 +73,6 @@ class Machine:
             self.temperature += j.temp_inc + random.uniform(-1.0, 1.4)
             self.vibration  += j.vib_inc  + random.uniform(-0.4, 0.6)
             self._maybe_spike()
-
             # thresholds
             if self.temperature >= self.temp_threshold or self.vibration >= self.vib_threshold:
                 # Return the job so the simulation can requeue to FRONT of same-class queue

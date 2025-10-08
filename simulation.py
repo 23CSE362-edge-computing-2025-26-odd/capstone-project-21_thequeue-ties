@@ -11,6 +11,9 @@ import joblib
 from machines import Machine
 from jobs import Job
 
+from iha_scheduler import run_iha
+
+
 TOPIC_JOB_STATUS     = "job/status"
 TOPIC_JOBSHOP        = "jobshop/status"
 TOPIC_JOB_TELEMETRY  = "job/telemetry"
@@ -38,7 +41,7 @@ if THRESHOLD < 0.32:
 
 # --- Warmup control (minimal change to reduce initial burst of failures) ---
 WARMUP_TICKS = 3  # assign at most one job per class per tick during first few ticks
-
+IHA_INTERVAL = 10
 # --- Feature builder state ---
 _prev = {}
 _roll = defaultdict(lambda: {"temp": deque(maxlen=5), "vib": deque(maxlen=5)})
@@ -97,7 +100,7 @@ class WorkspaceSimulation:
                  port=1883,
                  keepalive=60,
                  tick_seconds=1.0,
-                 seed_jobs=20):
+                 seed_jobs=5):
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
         self.client.connect(broker, port, keepalive)
@@ -107,14 +110,14 @@ class WorkspaceSimulation:
         self.tick_seconds = tick_seconds
 
         self.machines: List[Machine] = [
-            Machine("A", "A_1", 40, 85, 2.0, 8.0, 3),
+            Machine("A", "A_1", 40, 100, 2.0, 16.0, 3),
             Machine("A", "A_2", 41, 86, 2.2, 8.5, 3),
             Machine("A", "A_3", 42, 87, 2.1, 8.5, 3),
-            Machine("B", "B_1", 50, 90, 4.0, 12.0, 5),
+            Machine("B", "B_1", 50, 110, 4.0, 18.0, 5),
             Machine("B", "B_2", 49, 90, 3.8, 12.0, 5),
-            Machine("C", "C_1", 30, 80, 3.0, 10.0, 4),
+            Machine("C", "C_1", 30, 110, 3.0, 14.0, 4),
             Machine("C", "C_2", 31, 81, 3.2, 10.0, 4),
-            Machine("D", "D_1", 35, 95, 1.5, 14.0, 6),
+            Machine("D", "D_1", 35, 120, 1.5, 19.0, 6),
         ]
 
         self.class_queues: Dict[str, deque] = defaultdict(deque)
@@ -122,6 +125,26 @@ class WorkspaceSimulation:
             self.enqueue_new_job()
 
         self.completed_jobs = set()
+        # self.initial_allocation()
+    
+    def initial_allocation(self):
+        """
+        Allocate all existing jobs to their corresponding class queues.
+        This is called once after machines and jobs are created.
+        """
+        print("[INIT] Allocating initial jobs to class queues...")
+        for _ in range(len(self.class_queues)):  # ensure old queues cleared
+            for q in self.class_queues.values():
+                q.clear()
+
+        # Generate jobs and push them into their respective queues
+        # for _ in range(len(self.machines)):
+        #     job = Job.make_random()
+        #     self.class_queues[job.required_class].append(job)
+        #     print(f"[INIT] Queued job {job.job_id} into class {job.required_class}")
+
+        print("[INIT] Initial job allocation complete.\n")
+
 
     # --- MQTT ---
     def _on_connect(self, client, userdata, flags, rc):
@@ -160,44 +183,37 @@ class WorkspaceSimulation:
             self.class_queues[job.required_class].append(job)
 
     # --- Scheduling ---
-    def _assign_jobs(self):
-        # During warmup, stagger: at most one assignment per class per tick.
-        if self.t < WARMUP_TICKS:
-            assigned_classes = set()
-            for m in self.machines:
-                if (
-                    m.idle
-                    and self.class_queues[m.class_name]
-                    and m.class_name not in assigned_classes
-                ):
-                    job = self.class_queues[m.class_name].popleft()
-                    if m.assign(job):
-                        assigned_classes.add(m.class_name)
-                        self._publish_jobshop_event("STARTED", {
-                            "timestamp": self.t,
-                            "job_id": job.job_id,
-                            "machine_id": m.machine_id,
-                            "required_class": m.class_name,
-                            "step_remaining": job.remaining_ticks_on_step,
-                        })
-                    else:
-                        self.class_queues[m.class_name].appendleft(job)
-            return
-
-        # Normal behavior after warmup
+    def _assign_tasks(self):
+        """
+        Assign jobs from class queues to idle machines every tick.
+        Checks each machine's class, assigns next available job from its class queue if idle.
+        """
         for m in self.machines:
-            if m.idle and self.class_queues[m.class_name]:
-                job = self.class_queues[m.class_name].popleft()
-                if m.assign(job):
-                    self._publish_jobshop_event("STARTED", {
-                        "timestamp": self.t,
-                        "job_id": job.job_id,
-                        "machine_id": m.machine_id,
-                        "required_class": m.class_name,
-                        "step_remaining": job.remaining_ticks_on_step,
-                    })
-                else:
-                    self.class_queues[m.class_name].appendleft(job)
+            # Skip if machine is repairing or busy
+            if getattr(m, "repairing_left", 0) > 0 or not m.idle:
+                continue
+
+            cls = m.class_name
+            if not self.class_queues[cls]:
+                continue  # no jobs waiting in this class queue
+
+            # Take next job from this class queue
+            job = self.class_queues[cls].popleft()
+
+            if m.assign(job):
+                self._publish_jobshop_event("STARTED", {
+                    "timestamp": self.t,
+                    "job_id": job.job_id,
+                    "machine_id": m.machine_id,
+                    "required_class": m.class_name,
+                    "step_remaining": job.remaining_ticks_on_step,
+                    "method": "IHA"
+                })
+                print(f"[ASSIGN] Job {job.job_id} assigned to {m.machine_id}")
+            else:
+                # Machine rejected (shouldn't normally happen) — put job back
+                self.class_queues[cls].appendleft(job)
+                print(f"[ASSIGN] {m.machine_id} unable to take {job.job_id}, requeued.")
 
     # --- Prediction ---
     def _maybe_predict_failure(self, m: Machine):
@@ -231,18 +247,97 @@ class WorkspaceSimulation:
                 self._enqueue_current_step_front(j)
                 m.busy_with = None
             m.repairing_left = m.repair_time
+            
+    #-----------------------------------IHA----------------------------------------------
+    
+    def _run_iha_scheduler(self):
+        """
+        Run Improved Hungarian Algorithm (IHA) per unique class.
+        Takes all jobs from each class queue, runs IHA for that class, and reorders the queue
+        based on the optimal job-machine assignment order.
+        """
+        print(f"\n[IHA] Scheduler called at tick={self.t}")
 
+        # Collect all unique classes present
+        unique_classes = list(self.class_queues.keys())
+        if not unique_classes:
+            print("[IHA] No class queues found — skipping scheduler.")
+            return
+
+        for cls in unique_classes:
+            # Get idle machines and ready jobs for this class
+            idle_machines = [m for m in self.machines if m.idle and m.class_name == cls]
+            ready_jobs = list(self.class_queues[cls])
+
+            if not ready_jobs:
+                print(f"[IHA] No ready jobs for class {cls}, skipping.")
+                continue
+
+            if not idle_machines:
+                print(f"[IHA] No idle machines for class {cls}, keeping existing queue.")
+                continue
+
+            print(f"[IHA] Running optimization for class {cls} with {len(ready_jobs)} jobs and {len(idle_machines)} machines.")
+
+            # Run IHA for this class
+            assignments = run_iha(ready_jobs, idle_machines, weights=(0.6, 0.4))
+
+            if not assignments:
+                print(f"[IHA] No valid assignments found for class {cls}, keeping original queue.")
+                continue
+
+            # Extract jobs in the optimized order
+            ordered_jobs = [job for job, _ in assignments]
+
+            # Append unassigned jobs (if more jobs than machines)
+            remaining_jobs = [j for j in ready_jobs if j not in ordered_jobs]
+            final_order = ordered_jobs + remaining_jobs
+
+            # Replace the old queue with new optimized order
+            self.class_queues[cls] = deque(final_order)
+            print(f"[IHA] Updated order for class {cls}: {[j.job_id for j in final_order]}")
+
+        print("[IHA] Scheduler completed for all classes.\n")
+
+
+
+    
     # --- Tick ---
     def tick(self):
         self.t += 1
-        self._assign_jobs()
+        
+        recoveries = []
 
+        for m in self.machines:
+            # Detect when a machine just finished repair (optional until RECOVERY event is added)
+            if hasattr(m, "was_repairing"):
+                repairing_left = getattr(m, "repairing_left", 0.0)
+                currently_repairing = repairing_left > 0.0001
+                if m.was_repairing and not currently_repairing:
+                    recoveries.append(m)
+                m.was_repairing = currently_repairing
+            else:
+                m.was_repairing = getattr(m, "repairing_left", 0.0) > 0.0001
+
+        # Trigger IHA only for recoveries or periodically
+        if self.t % IHA_INTERVAL == 1:
+            print(f"[IHA] Generating new plan at tick={self.t}")
+            self._run_iha_scheduler()
+            
+        self._assign_tasks()
+
+        # Continue normal tick operations
+        #self._assign_jobs()
+        
+
+        # --- Machine processing loop ---
         for m in self.machines:
             self._maybe_predict_failure(m)
             event, data = m.step()
             self._publish_job_status(m)
             self._publish_job_telemetry(m)
 
+            # --- Handle machine events ---
             if event == "FAILED":
                 j = data
                 if j:
@@ -256,6 +351,9 @@ class WorkspaceSimulation:
                         "temperature": round(m.temperature, 2),
                         "vibration": round(m.vibration, 2),
                     })
+                print(f"[EVENT] Machine {m.machine_id} FAILED — reordering queue for class {m.class_name}")
+                self._run_iha_scheduler()  # reorder all queues so load is adjusted
+
             elif event == "STEP_DONE":
                 j = data
                 self._publish_jobshop_event("STEP_DONE", {
@@ -263,8 +361,12 @@ class WorkspaceSimulation:
                     "job_id": j.job_id,
                     "next_required_class": ("" if j.done else j.required_class),
                 })
-                if not j.done:
-                    self._enqueue_next_step(j)
+                
+                self._enqueue_next_step(j)
+                print(f"[EVENT] Job {j.job_id} STEP_DONE — updating next queue ({j.required_class})")
+                # Reorder only the next required class queue
+                self._run_iha_scheduler()
+
             elif event == "COMPLETED":
                 j = data
                 self.completed_jobs.add(j.job_id)
@@ -273,8 +375,10 @@ class WorkspaceSimulation:
                     "job_id": j.job_id,
                     "machine_id": m.machine_id,
                 })
+                
+                print(f"[EVENT] Job {j.job_id} COMPLETED on {m.machine_id}")
 
-        # check if all queues empty + all machines idle
+        # --- End of tick checks ---
         all_idle = all(m.idle for m in self.machines)
         queues_empty = all(len(q) == 0 for q in self.class_queues.values())
         if all_idle and queues_empty:
