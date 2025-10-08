@@ -1,4 +1,3 @@
-# jobs.py
 import itertools
 import random
 from dataclasses import dataclass, field
@@ -6,7 +5,6 @@ from typing import List, Tuple
 
 _job_id_counter = itertools.count(1)
 
-# Base load profiles (drive temp/vibration increments per tick)
 INTENSITIES = {
     "light":    {"temp_inc": 3.0, "vib_inc": 0.8},
     "moderate": {"temp_inc": 4.5, "vib_inc": 1.2},
@@ -14,7 +12,6 @@ INTENSITIES = {
     "stress":   {"temp_inc": 6.0, "vib_inc": 2.0},
 }
 
-# Route patterns: each entry is a SEQUENCE of machine CLASSES required
 ROUTE_PATTERNS = [
     ["A", "B"],
     ["A", "B", "C"],
@@ -25,22 +22,20 @@ ROUTE_PATTERNS = [
     ["A", "A", "B"],
 ]
 
-DURATION_TOTAL_RANGE = (8, 18)  # total ticks across whole job
+DURATION_TOTAL_RANGE = (8, 18)
+REDUCTION_RANGE = (0.2, 0.6)  # reduction percentage range
+
 
 @dataclass
 class Job:
-    """
-    Multi-step job. Each step requires a specific machine CLASS (A/B/C/D).
-    Steps are sequential; each has its own remaining ticks.
-    """
     job_id: str
     intensity: str
     temp_inc: float
     vib_inc: float
+    reduction: float = 0.0  # safe default for old calls
 
-    # steps: list of (required_class, remaining_ticks)
     steps: List[Tuple[str, int]] = field(default_factory=list)
-    current_step: int = 0  # index into steps
+    current_step: int = 0
 
     @property
     def done(self) -> bool:
@@ -68,12 +63,10 @@ class Job:
             self.current_step += 1
 
     def put_back_unfinished_step_front(self) -> None:
-        # Remaining ticks on current step are preserved; nothing else needed.
         return
 
     @classmethod
     def make_random(cls) -> "Job":
-        """Primary factory used by simulation."""
         jid = f"JOB_{next(_job_id_counter)}"
         intensity = random.choice(list(INTENSITIES.keys()))
         inc = INTENSITIES[intensity]
@@ -81,7 +74,6 @@ class Job:
         pattern = random.choice(ROUTE_PATTERNS)
         total = random.randint(*DURATION_TOTAL_RANGE)
 
-        # ensure >=2 ticks per step, then distribute the rest randomly
         base = [2] * len(pattern)
         remaining = max(0, total - sum(base))
         for _ in range(remaining):
@@ -89,15 +81,17 @@ class Job:
 
         steps = [(cls_name, dur) for cls_name, dur in zip(pattern, base)]
 
+        reduction_factor = random.uniform(*REDUCTION_RANGE)
+
         return cls(
             job_id=jid,
             intensity=intensity,
             temp_inc=inc["temp_inc"],
             vib_inc=inc["vib_inc"],
             steps=steps,
+            reduction=reduction_factor,
         )
 
-    # Optional back-compat factory if some code still calls Job.make(intensity)
     @classmethod
     def make(cls, intensity: str) -> "Job":
         jid = f"JOB_{next(_job_id_counter)}"
@@ -109,10 +103,12 @@ class Job:
         for _ in range(remaining):
             base[random.randrange(len(base))] += 1
         steps = [(cls_name, dur) for cls_name, dur in zip(pattern, base)]
+        reduction_factor = random.uniform(*REDUCTION_RANGE)
         return cls(
             job_id=jid,
             intensity=intensity,
             temp_inc=inc["temp_inc"],
             vib_inc=inc["vib_inc"],
             steps=steps,
+            reduction=reduction_factor,
         )

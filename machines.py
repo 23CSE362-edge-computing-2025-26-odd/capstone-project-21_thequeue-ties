@@ -40,6 +40,19 @@ class Machine:
             return False
         if job.required_class != self.class_name:
             return False
+        # --- reduction logic ---
+        # Compute difference from base values
+        temp_diff = self.temperature - self.temp_base
+        vib_diff  = self.vibration - self.vib_base
+
+        reduction = getattr(job, "reduction", 0.0)  # fallback safe
+
+        # Reduce current readings by that percentage of the excess
+        if reduction > 0:
+            self.temperature -= temp_diff * reduction
+            self.vibration  -= vib_diff * reduction
+
+        # Now assign the job
         self.busy_with = job
         return True
 
