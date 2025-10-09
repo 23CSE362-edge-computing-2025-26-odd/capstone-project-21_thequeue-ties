@@ -250,22 +250,33 @@ class WorkspaceSimulation:
             
     #-----------------------------------IHA----------------------------------------------
     
-    def _run_iha_scheduler(self):
+    def _run_iha_scheduler(self, target_class=None):
         """
-        Run Improved Hungarian Algorithm (IHA) per unique class.
-        Takes all jobs from each class queue, runs IHA for that class, and reorders the queue
-        based on the optimal job-machine assignment order.
-        """
-        print(f"\n[IHA] Scheduler called at tick={self.t}")
+        Run Improved Hungarian Algorithm (IHA) per class or for a specific class.
+        Args:
+            target_class (str or None): 
+                If given, only run IHA scheduling for that machine class (e.g. "A").
+                If None, run for all machine classes.
 
-        # Collect all unique classes present
+        The method takes all jobs from the relevant class queue(s),
+        runs IHA for each, and reorders the queue(s) based on
+        the optimal job-machine assignment order.
+        """
+        print(f"\n[IHA] Scheduler called at tick={self.t}, target_class={target_class or 'ALL'}")
+        # Collect all unique classes
         unique_classes = list(self.class_queues.keys())
         if not unique_classes:
             print("[IHA] No class queues found — skipping scheduler.")
             return
 
+        # Filter to a single class if requested
+        if target_class is not None:
+            if target_class not in unique_classes:
+                print(f"[IHA] Target class '{target_class}' not found — skipping.")
+                return
+            unique_classes = [target_class]
+
         for cls in unique_classes:
-            # Get idle machines and ready jobs for this class
             idle_machines = [m for m in self.machines if m.idle and m.class_name == cls]
             ready_jobs = list(self.class_queues[cls])
 
@@ -286,19 +297,13 @@ class WorkspaceSimulation:
                 print(f"[IHA] No valid assignments found for class {cls}, keeping original queue.")
                 continue
 
-            # Extract jobs in the optimized order
             ordered_jobs = [job for job, _ in assignments]
-
-            # Append unassigned jobs (if more jobs than machines)
             remaining_jobs = [j for j in ready_jobs if j not in ordered_jobs]
             final_order = ordered_jobs + remaining_jobs
 
-            # Replace the old queue with new optimized order
             self.class_queues[cls] = deque(final_order)
             print(f"[IHA] Updated order for class {cls}: {[j.job_id for j in final_order]}")
-
-        print("[IHA] Scheduler completed for all classes.\n")
-
+        print("[IHA] Scheduler completed.\n")
 
 
     
@@ -352,7 +357,7 @@ class WorkspaceSimulation:
                         "vibration": round(m.vibration, 2),
                     })
                 print(f"[EVENT] Machine {m.machine_id} FAILED — reordering queue for class {m.class_name}")
-                self._run_iha_scheduler()  # reorder all queues so load is adjusted
+                self._run_iha_scheduler(m.class_name)  # reorder all queues so load is adjusted
 
             elif event == "STEP_DONE":
                 j = data
@@ -365,7 +370,7 @@ class WorkspaceSimulation:
                 self._enqueue_next_step(j)
                 print(f"[EVENT] Job {j.job_id} STEP_DONE — updating next queue ({j.required_class})")
                 # Reorder only the next required class queue
-                self._run_iha_scheduler()
+                self._run_iha_scheduler(j.required_class)
 
             elif event == "COMPLETED":
                 j = data
