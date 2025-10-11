@@ -114,7 +114,7 @@ class WorkspaceSimulation:
             Machine("A", "A_2", 41, 86, 2.2, 8.5, 3),
             Machine("A", "A_3", 42, 87, 2.1, 8.5, 3),
             Machine("B", "B_1", 50, 110, 4.0, 18.0, 5),
-            Machine("B", "B_2", 49, 90, 3.8, 12.0, 5),
+            Machine("B", "B_2", 49, 100, 3.8, 14.0, 5),
             Machine("C", "C_1", 30, 110, 3.0, 14.0, 4),
             Machine("C", "C_2", 31, 81, 3.2, 10.0, 4),
             Machine("D", "D_1", 35, 120, 1.5, 19.0, 6),
@@ -253,23 +253,19 @@ class WorkspaceSimulation:
     def _run_iha_scheduler(self, target_class=None):
         """
         Run Improved Hungarian Algorithm (IHA) per class or for a specific class.
-        Args:
-            target_class (str or None): 
-                If given, only run IHA scheduling for that machine class (e.g. "A").
-                If None, run for all machine classes.
 
-        The method takes all jobs from the relevant class queue(s),
-        runs IHA for each, and reorders the queue(s) based on
-        the optimal job-machine assignment order.
+        Now supports predictive scheduling:
+        - Runs even if all machines in a class are busy.
+        - Uses both idle and busy machines' states (temp/vibration) to compute future order.
+        - Reorders class queue to prepare optimal job sequence in advance.
         """
         print(f"\n[IHA] Scheduler called at tick={self.t}, target_class={target_class or 'ALL'}")
-        # Collect all unique classes
+
         unique_classes = list(self.class_queues.keys())
         if not unique_classes:
             print("[IHA] No class queues found — skipping scheduler.")
             return
 
-        # Filter to a single class if requested
         if target_class is not None:
             if target_class not in unique_classes:
                 print(f"[IHA] Target class '{target_class}' not found — skipping.")
@@ -277,33 +273,39 @@ class WorkspaceSimulation:
             unique_classes = [target_class]
 
         for cls in unique_classes:
-            idle_machines = [m for m in self.machines if m.idle and m.class_name == cls]
+            # ✅ Include both idle and busy machines
+            class_machines = [m for m in self.machines if m.class_name == cls]
+
+            # All waiting jobs (including queued ones)
             ready_jobs = list(self.class_queues[cls])
 
             if not ready_jobs:
                 print(f"[IHA] No ready jobs for class {cls}, skipping.")
                 continue
 
-            if not idle_machines:
-                print(f"[IHA] No idle machines for class {cls}, keeping existing queue.")
+            if not class_machines:
+                print(f"[IHA] No machines found for class {cls}, skipping.")
                 continue
 
-            print(f"[IHA] Running optimization for class {cls} with {len(ready_jobs)} jobs and {len(idle_machines)} machines.")
+            print(f"[IHA] Running predictive optimization for class {cls} "
+                f"with {len(ready_jobs)} jobs and {len(class_machines)} machines.")
 
-            # Run IHA for this class
-            assignments = run_iha(ready_jobs, idle_machines, weights=(0.6, 0.4))
+            # Run IHA using all machines (predictive mode)
+            assignments = run_iha(ready_jobs, class_machines, weights=(0.6, 0.4))
 
             if not assignments:
                 print(f"[IHA] No valid assignments found for class {cls}, keeping original queue.")
                 continue
 
+            # New queue ordering
             ordered_jobs = [job for job, _ in assignments]
             remaining_jobs = [j for j in ready_jobs if j not in ordered_jobs]
             final_order = ordered_jobs + remaining_jobs
 
             self.class_queues[cls] = deque(final_order)
-            print(f"[IHA] Updated order for class {cls}: {[j.job_id for j in final_order]}")
-        print("[IHA] Scheduler completed.\n")
+            print(f"[IHA] Updated predictive order for class {cls}: {[j.job_id for j in final_order]}")
+
+        print("[IHA] Predictive scheduler completed.\n")
 
 
     

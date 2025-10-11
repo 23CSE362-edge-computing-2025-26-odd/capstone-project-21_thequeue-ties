@@ -362,6 +362,7 @@ export default function MQTTDashboard() {
               current_job: obj.current_job,
               temp_threshold: obj.temp_threshold,
               vib_threshold: obj.vib_threshold,
+              power_kwh_total: obj.power_kwh_total ?? 0,
               lastSeen: now,
             },
           }));
@@ -865,6 +866,10 @@ function MachineCard({ data, lastEvent, onSelect, selected }) {
 
       <div className="mt-2 text-[10px] text-neutral-500">
         T-thresh: {data.temp_threshold} · V-thresh: {data.vib_threshold}
+      </div>
+
+      <div className="mt-1 text-xs font-medium text-amber-300">
+        ⚡ Total Energy: {data.power_kwh_total?.toFixed(2)} kWh
       </div>
 
       <div className="mt-2 text-[10px] text-neutral-600">

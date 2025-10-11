@@ -22,6 +22,8 @@ class Machine:
     vibration: float = field(init=False)
     busy_with: Optional[Job] = field(default=None, init=False)
     repairing_left: int = field(default=0, init=False)
+    total_power_kwh: float = field(default=0.0, init=False)
+    
 
     def __post_init__(self):
         self.temperature = self.temp_base
@@ -65,7 +67,7 @@ class Machine:
         # small random spikes to occasionally cross thresholds
         if random.random() < 0.07:
             self.temperature += random.uniform(2.0, 6.0)
-        if random.random() < 0.05:
+        if random.random() < 0.07:
             self.vibration  += random.uniform(0.8, 2.0)
 
     # --- tick ---
@@ -85,6 +87,8 @@ class Machine:
             # apply job load + noise
             self.temperature += j.temp_inc + random.uniform(-1.0, 1.4)
             self.vibration  += j.vib_inc  + random.uniform(-0.4, 0.6)
+            power_kw = getattr(j, "current_power_kw", 0.0)
+            self.total_power_kwh += power_kw * (1 / 60)  # assuming 1 tick = 1 minute
             self._maybe_spike()
             # thresholds
             if self.temperature >= self.temp_threshold or self.vibration >= self.vib_threshold:
@@ -135,5 +139,6 @@ class Machine:
             "current_job": current_job,  # never null
             "temp_threshold": self.temp_threshold,
             "vib_threshold": self.vib_threshold,
+            "power_kwh_total": round(self.total_power_kwh, 3),
         }
         return json.dumps(doc)
